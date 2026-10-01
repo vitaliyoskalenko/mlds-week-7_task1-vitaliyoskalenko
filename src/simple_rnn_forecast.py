@@ -108,7 +108,15 @@ def make_windows(series: np.ndarray, window: int) -> Tuple[np.ndarray, np.ndarra
     Keras RNN layers expect inputs shaped as (batch, time, features).
     Here features=1 because the time series is univariate.
     """
-    raise NotImplementedError
+    series = np.asarray(series, dtype=np.float32).reshape(-1)
+    if not 1 <= window < len(series):
+        raise ValueError("window must satisfy 1 <= window < len(series)")
+    if not np.isfinite(series).all():
+        raise ValueError("series must contain finite values")
+
+    X = np.lib.stride_tricks.sliding_window_view(series[:-1], window).copy()
+    y = series[window:]
+    return X[..., np.newaxis], y.reshape(-1, 1)
 
 
 def time_split(
@@ -148,7 +156,24 @@ def time_split(
     - Do NOT shuffle.
     - The split is performed on already-windowed samples.
     """
-    raise NotImplementedError
+    if len(X) != len(y):
+        raise ValueError("X and y must have the same number of samples")
+    if not (0.0 < train_frac < 1.0 and 0.0 < val_frac < 1.0 and train_frac + val_frac < 1.0):
+        raise ValueError("fractions must be in (0, 1) and train_frac + val_frac < 1")
+
+    n = len(X)
+    n_train = int(n * train_frac)
+    n_val = int(n * val_frac)
+    n_test = n - n_train - n_val
+    if min(n_train, n_val, n_test) < 1:
+        raise ValueError("each split must contain at least one sample")
+
+    val_end = n_train + n_val
+    return (
+        (X[:n_train], y[:n_train]),
+        (X[n_train:val_end], y[n_train:val_end]),
+        (X[val_end:], y[val_end:]),
+    )
 
 
 def build_model(
@@ -186,7 +211,21 @@ def build_model(
     -----
     You may change the architecture slightly, but keep I/O shapes the same.
     """
-    raise NotImplementedError
+    model = tf.keras.Sequential(
+        [
+            tf.keras.layers.Input(shape=(window, 1)),
+            tf.keras.layers.LSTM(n_units),
+            tf.keras.layers.Dropout(dropout),
+            tf.keras.layers.Dense(dense_units, activation="relu"),
+            tf.keras.layers.Dense(1),
+        ]
+    )
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
+        loss="mse",
+        metrics=["mae"],
+    )
+    return model
 
 
 def train_model(
@@ -245,7 +284,27 @@ def train_model(
     - Prefer using EarlyStopping (optional) to reduce overfitting.
     - Keep the function deterministic as much as possible.
     """
-    raise NotImplementedError
+    tf.keras.utils.set_random_seed(seed)
+
+    X, y = make_windows(series, window)
+    (X_train, y_train), (X_val, y_val), (X_test, y_test) = time_split(X, y, train_frac, val_frac)
+
+    model = build_model(window)
+    early_stopping = tf.keras.callbacks.EarlyStopping(
+        monitor="val_loss",
+        patience=5,
+        restore_best_weights=True,
+    )
+    history = model.fit(
+        X_train,
+        y_train,
+        validation_data=(X_val, y_val),
+        epochs=epochs,
+        batch_size=batch_size,
+        callbacks=[early_stopping],
+        verbose=verbose,
+    )
+    return model, X_test, y_test, history
 
 
 # ----------------------------
